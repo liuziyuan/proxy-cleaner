@@ -169,7 +169,72 @@ else
   fi
 fi
 
-hdr "3. 关键站点连通性（穿代理实测）"
+hdr "3. 主服务生效层（scutil State，浏览器实际读取的数据源）"
+# macOS 系统代理只看「主服务」（PrimaryService）的 Proxies 字典。
+# Ivanti VPN 隧道建立后其 Pulse NC 服务会成为主服务，verge sysproxy 对此报
+# "no active network service" 而失效；主服务上的坏字典 networksetup 够不着
+# （不在其服务列表），只能 scutil 写 State 层（需 root）。
+PRIMARY_SVC=$(echo 'show State:/Network/Global/IPv4' | scutil | awk -F': ' '/PrimaryService/{gsub(/ /,"",$2); print $2}')
+if [[ -z "$PRIMARY_SVC" ]]; then
+  bad "无法读取系统主服务"
+else
+  info "系统主服务：${PRIMARY_SVC}"
+  PDICT=$(echo "show State:/Network/Service/${PRIMARY_SVC}/Proxies" | scutil)
+  http_en=$(awk  -F': ' '/HTTPEnable/{gsub(/ /,"",$2); print $2}'   <<<"$PDICT")
+  http_px=$(awk  -F': ' '/^ *HTTPProxy /{gsub(/ /,"",$2); print $2}' <<<"$PDICT")
+  http_pt=$(awk  -F': ' '/HTTPPort/{gsub(/ /,"",$2); print $2}'     <<<"$PDICT")
+  socks_en=$(awk -F': ' '/SOCKSEnable/{gsub(/ /,"",$2); print $2}'  <<<"$PDICT")
+  socks_px=$(awk -F': ' '/^ *SOCKSProxy /{gsub(/ /,"",$2); print $2}' <<<"$PDICT")
+  socks_pt=$(awk -F': ' '/SOCKSPort/{gsub(/ /,"",$2); print $2}'    <<<"$PDICT")
+
+  PDIRTY=0
+  if [[ "$http_en" == "1" && ( -z "$http_px" || "$http_pt" == "0" ) ]]; then
+    bad "主服务 HTTP 代理损坏态：Enabled=1 但 Server='${http_px:-空}' Port='${http_pt:-空}'"
+    PDIRTY=1
+  elif [[ "$socks_en" == "1" && ( -z "$socks_px" || "$socks_pt" == "0" ) ]]; then
+    bad "主服务 SOCKS 代理损坏态：Enabled=1 但 Server='${socks_px:-空}' Port='${socks_pt:-空}'"
+    PDIRTY=1
+  elif [[ "$http_en" == "1" && "$http_px" == "$PROXY_HOST" && "$http_pt" == "$PROXY_PORT" ]]; then
+    ok "主服务生效层代理正确 → ${PROXY_ADDR}"
+  elif [[ "$http_en" != "1" ]]; then
+    if [[ "$VPN_ON" == "1" ]]; then
+      warn "主服务生效层代理关闭 + VPN 在线 → 浏览器将裸奔直连被墙站"
+      PDIRTY=1
+    else
+      info "主服务生效层代理关闭（无 VPN 时由 TUN 分流接管，正常）"
+    fi
+  fi
+
+  if (( PDIRTY )); then
+    if (( DRY_RUN )); then
+      warn "[dry-run] 将执行：sudo scutil 改写 State:/Network/Service/${PRIMARY_SVC}/Proxies"
+    else
+      info "需要管理员权限改写生效层（将提示输入密码）..."
+      if sudo scutil <<EOF
+d.init
+d.add FTPPassive # 1
+d.add HTTPEnable # 1
+d.add HTTPPort # ${PROXY_PORT}
+d.add HTTPProxy s ${PROXY_HOST}
+d.add HTTPSEnable # 1
+d.add HTTPSPort # ${PROXY_PORT}
+d.add HTTPSProxy s ${PROXY_HOST}
+d.add SOCKSEnable # 1
+d.add SOCKSPort # ${PROXY_PORT}
+d.add SOCKSProxy s ${PROXY_HOST}
+set State:/Network/Service/${PRIMARY_SVC}/Proxies
+EOF
+      then
+        FIXED=1
+        fix "主服务生效层代理已改写为 ${PROXY_ADDR}（VPN 重连后若复发，重跑本脚本即可）"
+      else
+        bad "sudo 改写失败（取消或失败），生效层未修复"
+      fi
+    fi
+  fi
+fi
+
+hdr "4. 关键站点连通性（穿代理实测）"
 SITES_ALL_OK=1
 if proxy_alive; then
   info "说明：401/403/404 等响应均代表网络层可达（服务端正常应答，如 API 拒绝无凭证请求属正常）"
@@ -187,7 +252,7 @@ else
   bad "代理不可用，跳过站点测试"
 fi
 
-hdr "4. 直连对照（展示用，不作修复依据）"
+hdr "5. 直连对照（展示用，不作修复依据）"
 dcode=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' "$TEST_URL" 2>/dev/null)
 if [[ ! "$dcode" =~ ^[1-9][0-9]{2}$ ]]; then
   info "裸直连 ${TEST_URL}：被阻断（GFW 常态，正因如此必须走代理）"
@@ -201,6 +266,6 @@ if (( FIXED )); then
 elif (( SITES_ALL_OK )); then
   echo "  网络环境正常，全部关键站点可达。"
 else
-  echo "  存在异常项：代理不可用→见第 2 节；单站点不通→在 Verge 里切换节点后重跑。"
+  echo "  存在异常项：代理不可用→见第 2 节；主服务生效层损坏→见第 3 节（需输密码）；单站点不通→切换节点。"
 fi
 exit 0
