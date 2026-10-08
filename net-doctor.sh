@@ -187,16 +187,17 @@ else
   socks_px=$(awk -F': ' '/^ *SOCKSProxy /{gsub(/ /,"",$2); print $2}' <<<"$PDICT")
   socks_pt=$(awk -F': ' '/SOCKSPort/{gsub(/ /,"",$2); print $2}'    <<<"$PDICT")
 
+  # 损坏判定用宽口径：启用但值不是期望值即视为损坏（覆盖空值、畸形 array、错误地址）
   PDIRTY=0
-  if [[ "$http_en" == "1" && ( -z "$http_px" || "$http_pt" == "0" ) ]]; then
-    bad "主服务 HTTP 代理损坏态：Enabled=1 但 Server='${http_px:-空}' Port='${http_pt:-空}'"
+  if [[ "$http_en" == "1" && ( "$http_px" != "$PROXY_HOST" || "$http_pt" != "$PROXY_PORT" ) ]]; then
+    bad "主服务 HTTP 代理损坏：Enabled=1 但 Server='${http_px:-空}' Port='${http_pt:-空}'"
     PDIRTY=1
-  elif [[ "$socks_en" == "1" && ( -z "$socks_px" || "$socks_pt" == "0" ) ]]; then
-    bad "主服务 SOCKS 代理损坏态：Enabled=1 但 Server='${socks_px:-空}' Port='${socks_pt:-空}'"
+  elif [[ "$socks_en" == "1" && ( "$socks_px" != "$PROXY_HOST" || "$socks_pt" != "$PROXY_PORT" ) ]]; then
+    bad "主服务 SOCKS 代理损坏：Enabled=1 但 Server='${socks_px:-空}' Port='${socks_pt:-空}'"
     PDIRTY=1
-  elif [[ "$http_en" == "1" && "$http_px" == "$PROXY_HOST" && "$http_pt" == "$PROXY_PORT" ]]; then
+  elif [[ "$http_en" == "1" ]]; then
     ok "主服务生效层代理正确 → ${PROXY_ADDR}"
-  elif [[ "$http_en" != "1" ]]; then
+  else
     if [[ "$VPN_ON" == "1" ]]; then
       warn "主服务生效层代理关闭 + VPN 在线 → 浏览器将裸奔直连被墙站"
       PDIRTY=1
@@ -215,13 +216,13 @@ d.init
 d.add FTPPassive # 1
 d.add HTTPEnable # 1
 d.add HTTPPort # ${PROXY_PORT}
-d.add HTTPProxy s ${PROXY_HOST}
+d.add HTTPProxy ${PROXY_HOST}
 d.add HTTPSEnable # 1
 d.add HTTPSPort # ${PROXY_PORT}
-d.add HTTPSProxy s ${PROXY_HOST}
+d.add HTTPSProxy ${PROXY_HOST}
 d.add SOCKSEnable # 1
 d.add SOCKSPort # ${PROXY_PORT}
-d.add SOCKSProxy s ${PROXY_HOST}
+d.add SOCKSProxy ${PROXY_HOST}
 set State:/Network/Service/${PRIMARY_SVC}/Proxies
 EOF
       then
