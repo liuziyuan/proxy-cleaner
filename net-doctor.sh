@@ -164,7 +164,14 @@ else
       FIXED=1
       fix "Clash Verge 已拉起，代理端口 ${PROXY_ADDR} 恢复可用"
     else
-      bad "拉起后 ${PROXY_ADDR} 仍不可用，请手动打开 Clash Verge 检查订阅"
+      # 死代理安全网：代理配置指向无监听的端口会断掉所有浏览器流量，
+      # 此时关闭系统代理降级为直连，至少保住国内站点可用
+      bad "拉起后 ${PROXY_ADDR} 仍不可用——为避免「死代理」断网，关闭系统代理降级为直连"
+      networksetup -setwebproxystate "$NET_SERVICE" off 2>/dev/null
+      networksetup -setsecurewebproxystate "$NET_SERVICE" off 2>/dev/null
+      networksetup -setsocksfirewallproxystate "$NET_SERVICE" off 2>/dev/null
+      FIXED=1
+      warn "系统代理已关闭（${NET_SERVICE}）。修复 Clash 后重跑本脚本即可恢复代理"
     fi
   fi
 fi
@@ -196,7 +203,31 @@ else
     bad "主服务 SOCKS 代理损坏：Enabled=1 但 Server='${socks_px:-空}' Port='${socks_pt:-空}'"
     PDIRTY=1
   elif [[ "$http_en" == "1" ]]; then
-    ok "主服务生效层代理正确 → ${PROXY_ADDR}"
+    if proxy_alive; then
+      ok "主服务生效层代理正确 → ${PROXY_ADDR}"
+    else
+      # 死代理：值正确但端口无监听（Clash 未运行/崩溃），必须清除否则全站断网
+      warn "主服务代理指向 ${PROXY_ADDR} 但端口无监听（Clash 未运行）——死代理将断掉所有浏览器流量"
+      if (( DRY_RUN )); then
+        warn "[dry-run] 将执行：sudo scutil 清除主服务代理（置禁用，恢复直连）"
+      else
+        info "需要管理员权限清除主服务死代理（将提示输入密码）..."
+        if sudo scutil <<EOF
+d.init
+d.add FTPPassive # 1
+d.add HTTPEnable # 0
+d.add HTTPSEnable # 0
+d.add SOCKSEnable # 0
+set State:/Network/Service/${PRIMARY_SVC}/Proxies
+EOF
+        then
+          FIXED=1
+          fix "主服务死代理已清除（恢复直连）。Clash 恢复后重跑本脚本可重新启用代理"
+        else
+          bad "sudo 清除失败，死代理仍在——浏览器将无法访问任何网站"
+        fi
+      fi
+    fi
   else
     if [[ "$VPN_ON" == "1" ]]; then
       warn "主服务生效层代理关闭 + VPN 在线 → 浏览器将裸奔直连被墙站"

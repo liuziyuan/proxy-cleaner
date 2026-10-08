@@ -19,6 +19,50 @@ Ivanti VPN 在线时会抢占系统 DNS 并使 Clash TUN 分流失效；Clash Ve
 bug（sysproxy 损坏态：`Enabled: Yes` 但 Server 空、Port 0），浏览器随之裸奔直连，被墙网站
 （GitHub / Google 等）报 `ERR_CONNECTION_RESET`。
 
+### 故障全貌（2026-10-08 实战复盘）
+
+**根因因果链**：
+
+```
+VPN 隧道建立
+  └─ Pulse NC 服务（net.pulsesecure.pulse.nc.main）抢占系统主服务（PrimaryService）
+       ├─ macOS 系统代理只看主服务 → verge sysproxy 报 "no active network service" 失效（开关点不动）
+       └─ 主服务 State 层挂着 verge 历史遗留的坏代理字典（Enabled=1 但地址空/端口0）
+            └─ 浏览器读到坏代理 → 全站打不开
+```
+
+**四层机制速查**：
+
+| 层 | 诊断命令 | 谁在管 | 故障症状 |
+|---|---|---|---|
+| DNS 解析 | `scutil --dns` | VPN scoped DNS 抢占 | TUN fake-ip 劫持收不到查询 → 域名分流失效 |
+| TUN 路由 | `netstat -rn` | mihomo（`0/1`+`128.0/1`） | VPN 在线时路由残缺（只剩 `128.0/1`） |
+| 系统代理·配置层 | `networksetup -get*proxy` | verge（sysproxy 有 bug）/ net-doctor | Enabled 但 Server 空（写坏） |
+| 系统代理·生效层 | `scutil --proxy`（主服务 Proxies 字典） | configd，**浏览器实际读取** | 全禁 / 坏字典 / 死代理 |
+
+**修复手段矩阵**：
+
+| 病灶 | 手段 | 权限 |
+|---|---|---|
+| Wi-Fi 等常规服务代理坏 | `networksetup -set{web,secureweb,socksfirewall}proxy` | 用户 |
+| 主服务是 VPN NC 服务（networksetup 够不着，不在其服务列表） | `sudo scutil` 写 `State:/Network/Service/<主服务>/Proxies` | sudo |
+| mihomo 未运行 | `open -a "Clash Verge"` | 用户 |
+
+**scutil `d.add` 语法陷阱**：裸值即字符串（`d.add HTTPProxy 127.0.0.1`）；`#`=数字、`*`=数组。
+多写一个 `s`（如 `d.add HTTPProxy s 127.0.0.1`）会把值写成 array，configd 校验类型失败**拒绝采纳**
+——主服务字典看似写对，全局投影依然全禁，修了等于没修。
+
+**修复成功的唯一验证标准**：`scutil --proxy` 出现 `HTTPEnable:1 / HTTPProxy 127.0.0.1 / HTTPPort 7897`。
+主服务字典写对 ≠ 生效。
+
+**关停场景行为**：
+
+| 场景 | 行为 | 结果 |
+|---|---|---|
+| 只关 VPN（Clash 开着） | 主服务切回 Wi-Fi，其代理 7897 生效 | ✅ 干净 |
+| 只关 Clash（VPN 开着） | 7897 死端口但代理配置仍启用 | ❌ 死代理断网 → 脚本安全网自动降级直连 |
+| VPN + Clash 都关 | 死代理挂在 Wi-Fi 配置上 | ❌ 同上 |
+
 ### 功能
 
 - ✓ 检测 Ivanti VPN / Clash 内核运行状态，识别「VPN 共存模式」与「TUN 分流模式」
@@ -26,7 +70,7 @@ bug（sysproxy 损坏态：`Enabled: Yes` 但 Server 空、Port 0），浏览器
 - ✓ 检测并修复系统代理损坏态：**HTTP / HTTPS / SOCKS 三处都查**
   （Chromium 系浏览器如 Edge 优先走 SOCKS，SOCKS 损坏时全站打不开）
 - ✓ 关键站点连通性实测（穿代理）：GitHub / Google / `api.anthropic.com`（Claude Code）/ `claude.ai`
-- ✓ Clash 内核未运行时自动拉起 Clash Verge
+- ✓ Clash 内核未运行时自动拉起 Clash Verge；拉起失败自动清除死代理降级直连（防断网安全网）
 - ✓ 彩色输出；`-n` dry-run 只诊断不修改；幂等（已是正确值则零修改）
 
 ### 使用方法
